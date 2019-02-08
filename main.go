@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"syscall"
 )
 
@@ -29,6 +30,13 @@ func init() {
 
 func main() {
 	flag.Parse()
+	pid, err := os.OpenFile(fmt.Sprintf("%s.pid", file), os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
+		log.Fatalf("failed to create pid file: %s", err.Error())
+	} else {
+		pid.Write([]byte(strconv.Itoa(syscall.Getpid())))
+		defer pid.Close()
+	}
 	http.HandleFunc(url, func(w http.ResponseWriter, r *http.Request) {
 		cmd := exec.Command(shell, file)
 		cmd.Stdin = r.Body
