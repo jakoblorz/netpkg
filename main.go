@@ -5,27 +5,31 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 )
 
 var (
 	port  int
 	host  string
-	file  string
-	shell string
+	name  string
+	token string
+	chars = []rune("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 )
 
 func init() {
-	flag.IntVar(&port, "port", 8000, "set the port to listen on")
-	flag.StringVar(&host, "host", "0.0.0.0", "set the host to listen on")
-	flag.StringVar(&file, "file", "", "set the file to execute")
-	flag.StringVar(&shell, "shell", "sh", "set the shell")
+	flag.IntVar(&port, "p", 8000, "specify the port")
+	flag.StringVar(&host, "h", "0.0.0.0", "specify the host")
+	flag.StringVar(&name, "c", "sh", "name of the program to execute")
+	flag.StringVar(&token, "t", "", "secure the api with a token; set 'n' if no token is required")
 }
 
 func listen(network, address string) (*mux, error) {
@@ -36,8 +40,8 @@ func listen(network, address string) (*mux, error) {
 	return multiplex(ln), nil
 }
 
-func run(shell, file string, r io.Reader, w io.Writer) error {
-	cmd := exec.Command(shell, file)
+func run(name string, args []string, r io.Reader, w io.Writer) error {
+	cmd := exec.Command(name, args...)
 	cmd.Stdin = r
 	cmd.Stdout = w
 	return cmd.Run()
@@ -45,7 +49,27 @@ func run(shell, file string, r io.Reader, w io.Writer) error {
 
 func main() {
 	flag.Parse()
-	pid, err := os.OpenFile(fmt.Sprintf("%s.pid", file), os.O_RDWR|os.O_CREATE, 0666)
+	rand.Seed(time.Now().UnixNano())
+	if token == "" {
+		var builder strings.Builder
+		for i := 0; i < 32; i++ {
+			builder.WriteRune(chars[rand.Intn(len(chars))])
+		}
+		token = fmt.Sprintf("0x%s", builder.String())
+		log.Printf("Using Generated Token %s\n", token)
+	} else if token == "n" {
+		token = ""
+		log.Printf("Selected Not To Use Any Tokens\n")
+	} else {
+		log.Printf("Using Configured Token %s\n", token)
+	}
+	args := os.Args[len(os.Args)-flag.NArg():]
+	argsMsg := fmt.Sprintf("Using Configured Command \"%s", name)
+	for _, arg := range args {
+		argsMsg = fmt.Sprintf("%s %s", argsMsg, arg)
+	}
+	log.Printf("%s\"\n", argsMsg)
+	pid, err := os.OpenFile("netfn.pid", os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		log.Fatalf("failed to create pid file: %s", err.Error())
 	} else {
@@ -59,20 +83,25 @@ func main() {
 	defer sock.Close()
 	sig := make(chan os.Signal)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func(shell, file string) {
+	go func(name string, args []string) {
 		defer func() { sig <- syscall.SIGINT }()
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			if err := run(shell, file, r.Body, w); err != nil {
+			if err := run(name, args, r.Body, w); err != nil {
 				log.Printf("error executing request: %+v\n", err)
 			}
 		})
-		if err := http.Serve(sock.Listen([]byte{'G', 'P', 'D'}), nil); err != nil {
+		if err := http.Serve(sock.Listen([]byte{'G', 'P', 'D'}, "net/http"), nil); err != nil {
 			log.Printf("error listening on port: %+v\n", err)
 		}
-	}(shell, file)
-	go func(shell, file string) {
+	}(name, args)
+	go func(shell string, args []string) {
 		defer func() { sig <- syscall.SIGINT }()
-		ln := sock.Any()
+		var rn byte = '0'
+		if token != "" {
+			rn = token[0]
+		}
+		ln := sock.Any(rn, "net/tcp")
+		defer ln.Close()
 		for {
 			conn, err := ln.Accept()
 			if err, ok := err.(interface {
@@ -86,12 +115,14 @@ func main() {
 				return
 			}
 			go func(c net.Conn) {
-				if err := run(shell, file, c, c); err != nil {
+				if err := run(name, args, c, c); err != nil {
 					log.Printf("error executing request: %+v\n", err)
+					return
 				}
+				c.Close()
 			}(conn)
 		}
-	}(shell, file)
+	}(name, args)
 	go func() {
 		defer func() { sig <- syscall.SIGINT }()
 		if err := sock.Serve(); err != nil {

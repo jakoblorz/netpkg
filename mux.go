@@ -9,25 +9,24 @@ import (
 	"time"
 )
 
-const (
-	master byte = iota
-)
-
 type mux struct {
 	ln   net.Listener
 	once sync.Once
 	wg   sync.WaitGroup
 
 	handlers map[byte]*handle
+	lock     sync.Mutex
 
-	Timeout time.Duration
+	rn      byte
+	timeout time.Duration
 }
 
 func multiplex(ln net.Listener) *mux {
 	return &mux{
 		ln:       ln,
 		handlers: make(map[byte]*handle),
-		Timeout:  30 * time.Second,
+		rn:       '0',
+		timeout:  100 * time.Microsecond,
 	}
 }
 
@@ -37,6 +36,8 @@ func (mux *mux) Close() (err error) {
 			err = mux.ln.Close()
 		}
 		mux.wg.Wait()
+		mux.lock.Lock()
+		defer mux.lock.Unlock()
 		for _, h := range mux.handlers {
 			h.Close()
 		}
@@ -69,11 +70,12 @@ func (mux *mux) Serve() error {
 }
 
 func (mux *mux) handleConn(c net.Conn) error {
+	start := time.Now()
 	bufConn := &conn{
 		conn: c,
 		r:    bufio.NewReader(c),
 	}
-	if err := c.SetReadDeadline(time.Now().Add(mux.Timeout)); err != nil {
+	if err := c.SetReadDeadline(time.Now().Add(mux.timeout)); err != nil {
 		return fmt.Errorf("set read deadline: %+v", err)
 	}
 	hdr, err := bufConn.r.ReadByte()
@@ -86,27 +88,35 @@ func (mux *mux) handleConn(c net.Conn) error {
 		return fmt.Errorf("unset read deadline: %+v", err)
 	}
 	var h *handle
-	if h = mux.handlers[hdr]; h == nil && hdr != master {
-		h = mux.handlers[master]
+	mux.lock.Lock()
+	defer mux.lock.Unlock()
+	if h = mux.handlers[hdr]; h == nil && hdr != mux.rn {
+		hdr = mux.rn
+		h = mux.handlers[hdr]
 	}
 	if h == nil {
 		return fmt.Errorf("unregistered header byte: 0x%02x", hdr)
 	}
+	log.Printf("Receiving Request %s -> Matching '%s' (0x%02x) (%s) = %s", c.RemoteAddr(), string(hdr), hdr, time.Since(start), h.name)
 	h.c <- bufConn
 	return nil
 }
 
-func (mux *mux) Listen(hdrs []byte) net.Listener {
+func (mux *mux) Listen(hdrs []byte, name string) net.Listener {
 	h := &handle{
 		addr: mux.ln.Addr(),
+		name: name,
 		c:    make(chan net.Conn),
 	}
+	mux.lock.Lock()
+	defer mux.lock.Unlock()
 	for _, hdr := range hdrs {
 		mux.handlers[hdr] = h
 	}
 	return h
 }
 
-func (mux *mux) Any() net.Listener {
-	return mux.Listen([]byte{master})
+func (mux *mux) Any(rn byte, name string) net.Listener {
+	mux.rn = rn
+	return mux.Listen([]byte{rn}, name)
 }

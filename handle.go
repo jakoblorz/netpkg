@@ -8,6 +8,7 @@ import (
 
 type handle struct {
 	addr net.Addr
+	name string
 	c    chan net.Conn
 	once sync.Once
 }
