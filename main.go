@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -86,8 +88,16 @@ func main() {
 	go func(name string, args []string) {
 		defer func() { sig <- syscall.SIGINT }()
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("token") != token {
+				w.WriteHeader(http.StatusForbidden)
+				fmt.Fprint(w, "error validating token: token not correct\n")
+				return
+			}
 			if err := run(name, args, r.Body, w); err != nil {
-				log.Printf("error executing request: %+v\n", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				err := fmt.Sprintf("error executing request: %+v\n", err)
+				fmt.Fprintf(w, "%+v\n", err)
+				log.Printf("%+v\n", err)
 			}
 		})
 		if err := http.Serve(sock.Listen([]byte{'G', 'P', 'D'}, "net/http"), nil); err != nil {
@@ -115,11 +125,24 @@ func main() {
 				return
 			}
 			go func(c net.Conn) {
-				if err := run(name, args, c, c); err != nil {
-					log.Printf("error executing request: %+v\n", err)
+				defer c.Close()
+				r := bufio.NewReader(c)
+				for i := 0; i < len(token); i++ {
+					cmp, _, err := r.ReadRune()
+					if !(err == nil && byte(cmp) == token[i]) {
+						if err == nil {
+							err = errors.New("token not correct")
+						}
+						fmt.Fprintf(c, "error validating token: %+v\n", err)
+						return
+					}
+				}
+				if err := run(name, args, r, c); err != nil {
+					err := fmt.Sprintf("error executing request: %+v\n", err)
+					fmt.Fprintf(c, "%+v\n", err)
+					log.Printf("%+v\n", err)
 					return
 				}
-				c.Close()
 			}(conn)
 		}
 	}(name, args)
