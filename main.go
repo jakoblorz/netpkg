@@ -71,7 +71,7 @@ func main() {
 		argsMsg = fmt.Sprintf("%s %s", argsMsg, arg)
 	}
 	log.Printf("%s\"\n", argsMsg)
-	pid, err := os.OpenFile("netfn.pid", os.O_RDWR|os.O_CREATE, 0666)
+	pid, err := os.OpenFile("netpkg.pid", os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		log.Fatalf("failed to create pid file: %s", err.Error())
 	} else {
